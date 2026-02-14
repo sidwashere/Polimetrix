@@ -1,0 +1,5 @@
+{
+  "name": "PoliMetric Live",
+  "description": "Real-time political sentiment tracking dashboard using AI analysis and multi-source data aggregation.",
+  "requestFramePermissions": []
+}

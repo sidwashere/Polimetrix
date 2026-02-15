@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Politician } from '../types';
-import { TrendingUp, TrendingDown, Minus, Quote, RefreshCw, Trash2, Loader2 } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Quote, RefreshCw, Trash2, Loader2, Activity, Zap, Radio } from 'lucide-react';
 
 interface LeaderboardCardProps {
   politician: Politician;
@@ -9,6 +9,12 @@ interface LeaderboardCardProps {
   onRemove?: (id: string) => void;
   isRefreshing?: boolean;
   autoRefreshEnabled?: boolean;
+  volatility?: number;
+  momentum?: number;
+  mediaFrequency?: number;
+  sentimentRatio?: number;
+  influenceScore?: number;
+  consistencyScore?: number;
 }
 
 export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ 
@@ -17,7 +23,13 @@ export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({
   onRefresh, 
   onRemove,
   isRefreshing = false,
-  autoRefreshEnabled = false
+  autoRefreshEnabled = false,
+  volatility = 0,
+  momentum = 0,
+  mediaFrequency = 0,
+  sentimentRatio = 0,
+  influenceScore = 0,
+  consistencyScore = 0
 }) => {
   // State for visual flash animation on update
   const prevScore = useRef(politician.score);
@@ -167,6 +179,65 @@ export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({
                  <span>80</span>
                  <span>120</span>
                </div>
+            </div>
+          </div>
+          
+          {/* Additional Metrics */}
+          <div className="mt-3 pt-3 border-t border-slate-50 grid grid-cols-3 gap-2">
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <Activity size={10} />
+                <span className="text-[9px] uppercase font-bold">Volatility</span>
+              </div>
+              <span className={`text-xs font-bold ${volatility > 2 ? 'text-amber-600' : volatility > 1 ? 'text-amber-500' : 'text-slate-600'}`}>
+                {volatility.toFixed(2)}
+              </span>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <Zap size={10} />
+                <span className="text-[9px] uppercase font-bold">Momentum</span>
+              </div>
+              <span className={`text-xs font-bold ${momentum > 0.5 ? 'text-emerald-600' : momentum < -0.5 ? 'text-rose-600' : 'text-slate-600'}`}>
+                {momentum > 0 ? '+' : ''}{momentum.toFixed(2)}
+              </span>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <Radio size={10} />
+                <span className="text-[9px] uppercase font-bold">Mentions</span>
+              </div>
+              <span className="text-xs font-bold text-slate-600">
+                {mediaFrequency}
+              </span>
+            </div>
+          </div>
+          
+          {/* Extended Metrics */}
+          <div className="mt-2 pt-2 border-t border-slate-50 grid grid-cols-3 gap-2">
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <span className="text-[9px] uppercase font-bold">Sentiment</span>
+              </div>
+              <span className={`text-xs font-bold ${sentimentRatio > 0.2 ? 'text-emerald-600' : sentimentRatio < -0.2 ? 'text-rose-600' : 'text-slate-600'}`}>
+                {sentimentRatio > 0 ? '+' : ''}{sentimentRatio.toFixed(2)}
+              </span>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <span className="text-[9px] uppercase font-bold">Influence</span>
+              </div>
+              <span className="text-xs font-bold text-indigo-600">
+                {influenceScore.toFixed(0)}
+              </span>
+            </div>
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-1 text-slate-400 mb-0.5">
+                <span className="text-[9px] uppercase font-bold">Consistency</span>
+              </div>
+              <span className={`text-xs font-bold ${consistencyScore > 70 ? 'text-emerald-600' : consistencyScore < 40 ? 'text-rose-600' : 'text-slate-600'}`}>
+                {consistencyScore.toFixed(0)}%
+              </span>
             </div>
           </div>
       </div>

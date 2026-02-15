@@ -5,6 +5,7 @@ import { ExternalLink } from 'lucide-react';
 
 interface TrendChartProps {
   politicians: Politician[];
+  historyWindowDays?: number;
 }
 
 const CustomTooltip = ({ active, payload, label }: any) => {
@@ -49,8 +50,7 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   return null;
 };
 
-export const TrendChart: React.FC<TrendChartProps> = ({ politicians }) => {
-  
+export const TrendChart: React.FC<TrendChartProps> = ({ politicians, historyWindowDays = 180 }) => {
   // 1. Collect all unique dates from all politicians
   const allDates = new Set<string>();
   politicians.forEach(p => {

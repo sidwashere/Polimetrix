@@ -1,11 +1,33 @@
 export interface HistoryItem {
   time: string;
   score: number;
-  reason?: string; // Short context why the score changed (e.g. "Finance Bill Protests")
-  sourceUrl?: string; // Link to the source verifying this event
+  reason?: string;
+  sourceUrl?: string;
+  sentiment?: SentimentType;
+}
+
+export interface PoliticianMetrics {
+  volatility: number;
+  momentum: number;
+  mediaFrequency: number;
+  lastUpdated?: string;
 }
 
 export interface Politician {
+  id: string;
+  name: string;
+  role: string;
+  party: string;
+  score: number;
+  trend: number;
+  color: string;
+  image: string;
+  history: HistoryItem[];
+  isCustom?: boolean;
+  bio?: string;
+  slogan?: string;
+  metrics?: PoliticianMetrics;
+}
   id: string;
   name: string;
   role: string;
@@ -43,8 +65,28 @@ export interface NewsEvent {
 }
 
 export interface SimulationConfig {
-  scanInterval: number; // ms
+  scanInterval: number;
   isPaused: boolean;
-  useAI: boolean; // Whether to use Gemini or mock generator
-  autoRefreshCandidates: boolean; // Automatically refresh candidate stats every 30m
+  useAI: boolean;
+  autoRefreshCandidates: boolean;
+  historyWindowDays: number;
+}
+
+export interface AdvancedPrediction {
+  nextWeek: number;
+  confidence: number;
+  trend: 'rising' | 'falling' | 'stable';
+}
+
+export interface MovingAverages {
+  sma7: number;
+  sma14: number;
+  sma30: number;
+  ema12: number;
+}
+
+export interface SentimentBreakdown {
+  positive: number;
+  negative: number;
+  neutral: number;
 }

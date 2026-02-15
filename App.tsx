@@ -2,13 +2,15 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { INITIAL_POLITICIANS, INITIAL_SOURCES, MOCK_HEADLINES } from './constants';
 import { Politician, Source, NewsEvent, SimulationConfig, SentimentType } from './types';
 import { fetchAIEvent, fetchSuggestedSources, fetchHistoricalStats, fetchCandidateImage } from './services/geminiService';
+import { calculateAllMetrics, calculateAnalyticsSummary, calculateVolatility, calculateMomentum, calculateMediaFrequency, calculateSentimentRatio, calculateInfluenceScore, calculateConsistencyScore } from './services/analyticsService';
 import { Ticker } from './components/Ticker';
 import { LeaderboardCard } from './components/LeaderboardCard';
 import { TrendChart } from './components/TrendChart';
 import { LiveFeed } from './components/LiveFeed';
 import { SourceManager } from './components/SourceManager';
 import { CandidateManager } from './components/CandidateManager';
-import { BarChart3, Settings, Play, Pause, Activity, AlertTriangle, Search, Database, Loader2, RotateCcw, X } from 'lucide-react';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { BarChart3, Settings, Play, Pause, Activity, AlertTriangle, Search, Database, Loader2, RotateCcw, X, Brain } from 'lucide-react';
 
 const STORAGE_KEYS = {
     POLITICIANS: 'poli_politicians_v1',
@@ -16,6 +18,41 @@ const STORAGE_KEYS = {
     FEED: 'poli_feed_v1',
     CONFIG: 'poli_config_v1',
     POTENTIAL_SOURCES: 'poli_potential_sources_v1'
+};
+
+const calculateVolatility = (history: Politician['history']): number => {
+    if (history.length < 2) return 0;
+    const scores = history.filter(h => h.time).map(h => h.score);
+    if (scores.length < 2) return 0;
+    
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const variance = scores.reduce((sum, score) => sum + Math.pow(score - mean, 2), 0) / scores.length;
+    return Math.sqrt(variance);
+};
+
+const calculateMomentum = (history: Politician['history']): number => {
+    if (history.length < 7) return 0;
+    
+    const validHistory = history.filter(h => h.time);
+    if (validHistory.length < 14) return 0;
+    
+    const recent7 = validHistory.slice(-7);
+    const prev7 = validHistory.slice(-14, -7);
+    
+    const recentAvg = recent7.reduce((a, b) => a + b.score, 0) / recent7.length;
+    const prevAvg = prev7.reduce((a, b) => a + b.score, 0) / prev7.length;
+    
+    return parseFloat((recentAvg - prevAvg).toFixed(2));
+};
+
+const calculateMediaFrequency = (feed: NewsEvent[], politicianId: string): number => {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    return feed.filter(event => {
+        const eventDate = new Date(event.timestamp);
+        return event.politicianId === politicianId && eventDate >= thirtyDaysAgo;
+    }).length;
 };
 
 export default function App() {
@@ -46,7 +83,8 @@ export default function App() {
         scanInterval: 8000, 
         isPaused: false,
         useAI: false,
-        autoRefreshCandidates: true // Default to true
+        autoRefreshCandidates: true,
+        historyWindowDays: 180
       };
       return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
   });
@@ -58,6 +96,7 @@ export default function App() {
   const [addingCandidateId, setAddingCandidateId] = useState<boolean>(false);
   const [isApiKeyMissing, setIsApiKeyMissing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAnalytics, setShowAnalytics] = useState(false);
 
   // Persistence Effects
   useEffect(() => {
@@ -114,7 +153,7 @@ export default function App() {
         try {
             // Process one politician at a time
             const fetchPromises = [];
-            if (!hasHistory) fetchPromises.push(fetchHistoricalStats(pol));
+            if (!hasHistory) fetchPromises.push(fetchHistoricalStats(pol, config.historyWindowDays));
             else fetchPromises.push(Promise.resolve(null));
 
             if (hasPlaceholderImage) fetchPromises.push(fetchCandidateImage(pol.name));
@@ -306,14 +345,13 @@ export default function App() {
   const handleAddCandidate = async (candidate: Politician) => {
       setPoliticians(prev => [...prev, candidate]);
       
-      if (config.useAI && !isApiKeyMissing) {
-          setAddingCandidateId(true);
-          try {
-             // Fetch real data
-             const [history, image] = await Promise.all([
-                 fetchHistoricalStats(candidate),
-                 fetchCandidateImage(candidate.name)
-             ]);
+       if (config.useAI && !isApiKeyMissing) {
+           setAddingCandidateId(true);
+           try {
+              const [history, image] = await Promise.all([
+                  fetchHistoricalStats(candidate, config.historyWindowDays),
+                  fetchCandidateImage(candidate.name)
+              ]);
 
              setPoliticians(prev => prev.map(p => {
                  if (p.id === candidate.id) {
@@ -363,9 +401,9 @@ export default function App() {
               }
               
                const [history, image] = await Promise.all([
-                 fetchHistoricalStats(pol),
-                 fetchCandidateImage(pol.name)
-             ]);
+                  fetchHistoricalStats(pol, config.historyWindowDays),
+                  fetchCandidateImage(pol.name)
+              ]);
 
              setPoliticians(prev => prev.map(p => {
                  if (p.id === id) {
@@ -386,9 +424,15 @@ export default function App() {
       }
   };
 
-  const togglePause = () => setConfig(prev => ({ ...prev, isPaused: !prev.isPaused }));
+const togglePause = () => setConfig(prev => ({ ...prev, isPaused: !prev.isPaused }));
   const addSource = (source: Source) => setSources(prev => [...prev, source]);
   const removeSource = (id: string) => setSources(prev => prev.filter(s => s.id !== id));
+
+  const handleImportData = (data: { politicians: Politician[], feed: NewsEvent[], sources: Source[] }) => {
+    setPoliticians(data.politicians);
+    setFeed(data.feed);
+    setSources(data.sources);
+  };
 
   // Filter and Sort
   const filteredPoliticians = politicians.filter(p => 
@@ -422,13 +466,21 @@ export default function App() {
                         {config.isPaused ? <><Play size={14}/> Resume</> : <><Pause size={14}/> Pause</>}
                      </button>
                      
-                     <button 
-                        onClick={() => setShowSettings(!showSettings)}
-                        className={`p-2 rounded-md text-slate-300 hover:bg-slate-700 hover:text-white transition-colors ${showSettings ? 'bg-slate-700 text-white' : ''}`}
-                        title="Settings"
-                     >
-                        <Settings size={18} />
-                     </button>
+<button 
+                         onClick={() => setShowSettings(!showSettings)}
+                         className={`p-2 rounded-md text-slate-300 hover:bg-slate-700 hover:text-white transition-colors ${showSettings ? 'bg-slate-700 text-white' : ''}`}
+                         title="Settings"
+                      >
+                         <Settings size={18} />
+                      </button>
+
+                      <button 
+                         onClick={() => setShowAnalytics(!showAnalytics)}
+                         className={`p-2 rounded-md text-slate-300 hover:bg-slate-700 hover:text-white transition-colors ${showAnalytics ? 'bg-slate-700 text-white' : ''}`}
+                         title="Analytics Dashboard"
+                      >
+                         <Brain size={18} />
+                      </button>
 
                      <button
                         onClick={handleResetData}
@@ -450,23 +502,40 @@ export default function App() {
                                     <X size={14} />
                                 </button>
                             </div>
-                            <div className="space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex flex-col">
-                                        <span className="text-sm font-medium text-slate-700">Auto-Refresh Stats</span>
-                                        <span className="text-[10px] text-slate-400">Fetch new data every 30m</span>
-                                    </div>
-                                    <button 
-                                        onClick={() => setConfig(prev => ({...prev, autoRefreshCandidates: !prev.autoRefreshCandidates}))}
-                                        className={`w-10 h-5 rounded-full relative transition-colors ${config.autoRefreshCandidates ? 'bg-indigo-600' : 'bg-slate-300'}`}
-                                    >
-                                        <span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${config.autoRefreshCandidates ? 'translate-x-5' : 'translate-x-0'}`} />
-                                    </button>
-                                </div>
-                                <div className="text-[10px] text-slate-400 bg-slate-50 p-2 rounded">
-                                    Note: Auto-refresh performs a deep analysis of each candidate using current sources.
-                                </div>
-                            </div>
+                             <div className="space-y-4">
+                                 <div className="flex items-center justify-between">
+                                     <div className="flex flex-col">
+                                         <span className="text-sm font-medium text-slate-700">Auto-Refresh Stats</span>
+                                         <span className="text-[10px] text-slate-400">Fetch new data every 30m</span>
+                                     </div>
+                                     <button 
+                                         onClick={() => setConfig(prev => ({...prev, autoRefreshCandidates: !prev.autoRefreshCandidates}))}
+                                         className={`w-10 h-5 rounded-full relative transition-colors ${config.autoRefreshCandidates ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                                     >
+                                         <span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${config.autoRefreshCandidates ? 'translate-x-5' : 'translate-x-0'}`} />
+                                     </button>
+                                 </div>
+                                 <div className="flex items-center justify-between">
+                                     <div className="flex flex-col">
+                                         <span className="text-sm font-medium text-slate-700">History Window</span>
+                                         <span className="text-[10px] text-slate-400">Days of historical data to fetch</span>
+                                     </div>
+                                     <select 
+                                         value={config.historyWindowDays}
+                                         onChange={(e) => setConfig(prev => ({...prev, historyWindowDays: parseInt(e.target.value)}))}
+                                         className="text-sm border border-slate-300 rounded px-2 py-1 focus:border-indigo-500 focus:outline-none"
+                                     >
+                                         <option value={60}>60 days</option>
+                                         <option value={90}>90 days</option>
+                                         <option value={120}>120 days</option>
+                                         <option value={180}>180 days</option>
+                                         <option value={365}>365 days</option>
+                                     </select>
+                                 </div>
+                                 <div className="text-[10px] text-slate-400 bg-slate-50 p-2 rounded">
+                                     Note: Auto-refresh performs a deep analysis of each candidate using current sources.
+                                 </div>
+                             </div>
                         </div>
                      )}
                 </div>
@@ -531,6 +600,12 @@ export default function App() {
                                 onRemove={handleDeleteCandidate}
                                 isRefreshing={refreshingCandidateId === pol.id}
                                 autoRefreshEnabled={config.autoRefreshCandidates}
+                                volatility={calculateVolatility(pol.history)}
+                                momentum={calculateMomentum(pol.history)}
+                                mediaFrequency={calculateMediaFrequency(feed, pol.id)}
+                                sentimentRatio={calculateSentimentRatio(pol.history)}
+                                influenceScore={calculateInfluenceScore(pol.history, sources, feed)}
+                                consistencyScore={calculateConsistencyScore(pol.history)}
                             />
                         ))}
                     </div>
@@ -545,7 +620,11 @@ export default function App() {
                     <div className="flex justify-between items-center mb-6">
                         <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
                             <BarChart3 size={20} className="text-indigo-600"/>
-                            60-Day Trend Velocity
+                            {config.historyWindowDays <= 60 ? "60-Day Trend Velocity" : 
+                             config.historyWindowDays <= 90 ? "90-Day Trend Velocity" :
+                             config.historyWindowDays <= 120 ? "120-Day Trend Velocity" :
+                             config.historyWindowDays <= 180 ? "6-Month Trend Velocity" :
+                             "1-Year Trend Velocity"}
                         </h3>
                         <div className="flex gap-2">
                            <span className="text-xs font-medium px-2 py-1 bg-slate-100 rounded text-slate-600">Historical & Live</span>
@@ -556,9 +635,19 @@ export default function App() {
                             Analyzing recent political data...
                         </div>
                     ) : (
-                        <TrendChart politicians={politicians} />
+                        <TrendChart politicians={politicians} historyWindowDays={config.historyWindowDays} />
                     )}
                 </div>
+
+                {/* Analytics Dashboard */}
+                {showAnalytics && (
+                    <AnalyticsDashboard 
+                        politicians={politicians}
+                        feed={feed}
+                        sources={sources}
+                        onImport={handleImportData}
+                    />
+                )}
                 
                 {/* Mobile Candidates & Sources */}
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 lg:hidden">

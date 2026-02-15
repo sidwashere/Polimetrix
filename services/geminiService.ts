@@ -70,10 +70,11 @@ const historicalSchema: Schema = {
         properties: {
           date: { type: Type.STRING, description: "Exact date of the event in YYYY-MM-DD format." },
           headline: { type: Type.STRING, description: "Event summary" },
+          sentiment: { type: Type.STRING, enum: ["positive", "negative", "neutral"] },
           impact: { type: Type.NUMBER, description: "Impact on popularity (-5.0 to +5.0)" },
           sourceUrl: { type: Type.STRING, description: "The direct URL to the source verifying this specific event. REQUIRED." }
         },
-        required: ["date", "headline", "impact", "sourceUrl"]
+        required: ["date", "headline", "sentiment", "impact", "sourceUrl"]
       }
     }
   }
@@ -113,16 +114,18 @@ export const fetchAIEvent = async (
 
   return withRetry(async () => {
       const prompt = `
-        Search for the very latest news (last 24-48 hours only) regarding "${targetPolitician.name}" in Kenyan politics (2027 election context).
-        Ignore any news older than 48 hours.
+        Search for the very latest news (last 24-72 hours only) regarding "${targetPolitician.name}" who is a Kenyan politician from ${targetPolitician.party}.
+        ${targetPolitician.bio ? `Background: ${targetPolitician.bio}` : ''}
+        Focus on the 2027 Kenyan presidential election context.
+        Ignore any news older than 72 hours.
         Find a specific, real recent event.
         
         Return a JSON object with:
         1. 'headline': A short summary of the event.
-        2. 'sourceName': The name of the publisher (e.g. Daily Nation, The Star, Twitter/X).
+        2. 'sourceName': The name of the publisher (e.g. Daily Nation, The Star, Twitter/X, Citizen TV).
         3. 'sentiment': 'positive', 'negative', or 'neutral' for the politician.
         4. 'impact': A score 0.1 to 3.0 based on significance.
-        5. 'publishedDate': The exact date and time of publication. Be precise (e.g. "Oct 24, 2:30 PM").
+        5. 'publishedDate': The exact date and time of publication. Be precise (e.g. "Oct 24, 2:30 PM" or "2024-10-24").
         6. 'sourceUrl': The direct link to the article.
       `;
 
@@ -170,28 +173,30 @@ export const fetchAIEvent = async (
   });
 };
 
-export const fetchHistoricalStats = async (politician: Politician): Promise<HistoryItem[] | null> => {
+export const fetchHistoricalStats = async (politician: Politician, days: number = 180): Promise<HistoryItem[] | null> => {
   const apiKey = process.env.API_KEY;
   if (!apiKey) return null;
 
   return withRetry(async () => {
-      const sixtyDaysAgo = new Date();
-      sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
-      const cutoffDateString = sixtyDaysAgo.toISOString().split('T')[0];
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - days);
+      const cutoffDateString = cutoffDate.toISOString().split('T')[0];
 
       const prompt = `
-        Research the political performance of "${politician.name}" in Kenya over the last 60 DAYS.
-        Identify 5-7 distinct key events that affected their popularity.
+        Research the political performance of "${politician.name}" in Kenya over the last ${days} DAYS (from ${cutoffDateString} to today).
+        Identify 8-12 distinct key events that affected their popularity. The more events the better for accuracy.
         
         STRICT REQUIREMENTS:
         1. Only include events that happened AFTER ${cutoffDateString}.
-        2. Do NOT include any event older than 60 days.
+        2. Do NOT include any event older than ${days} days.
         3. Provide the EXACT DATE (YYYY-MM-DD) for each event.
         4. Provide a VALID SOURCE URL for each event.
+        5. Determine sentiment: 'positive', 'negative', or 'neutral' for each event.
         
         Return a JSON array of events with:
         - 'date': exact date (YYYY-MM-DD)
         - 'headline': very short summary
+        - 'sentiment': 'positive', 'negative', or 'neutral'
         - 'impact': score impact (-5.0 to +5.0)
         - 'sourceUrl': link to the source
       `;
@@ -219,7 +224,7 @@ export const fetchHistoricalStats = async (politician: Politician): Promise<Hist
       const validEvents = data.history.filter((e: any) => {
           const eventDate = new Date(e.date);
           const hasUrl = e.sourceUrl && e.sourceUrl.startsWith('http');
-          const isRecent = !isNaN(eventDate.getTime()) && eventDate >= sixtyDaysAgo;
+          const isRecent = !isNaN(eventDate.getTime()) && eventDate >= cutoffDate;
           return isRecent && hasUrl;
       });
 
@@ -231,7 +236,8 @@ export const fetchHistoricalStats = async (politician: Politician): Promise<Hist
           time: event.date,
           score: parseFloat(currentScore.toFixed(2)),
           reason: event.headline,
-          sourceUrl: event.sourceUrl
+          sourceUrl: event.sourceUrl,
+          sentiment: event.sentiment as SentimentType
         });
       }
 

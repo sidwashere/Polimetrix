@@ -1,6 +1,7 @@
 import React from 'react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from 'recharts';
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend, Brush } from 'recharts';
 import { Politician } from '../types';
+import { ExternalLink } from 'lucide-react';
 
 interface TrendChartProps {
   politicians: Politician[];
@@ -9,22 +10,39 @@ interface TrendChartProps {
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
     return (
-      <div className="bg-white p-3 border border-slate-200 shadow-lg rounded-lg text-xs">
-        <p className="font-bold text-slate-700 mb-2">{label}</p>
-        {payload.map((entry: any) => (
-          <div key={entry.name} className="mb-1">
-            <div className="flex items-center gap-2">
-               <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }}></span>
-               <span className="font-medium">{entry.name}: {entry.value}</span>
-            </div>
-            {/* Show the reason/context if passed in the payload */}
-            {entry.payload[`${entry.dataKey}_reason`] && (
-                <p className="text-slate-400 pl-4 italic max-w-[200px] truncate">
-                    {entry.payload[`${entry.dataKey}_reason`]}
-                </p>
-            )}
-          </div>
-        ))}
+      <div className="bg-white p-3 border border-slate-200 shadow-xl rounded-lg text-xs max-w-[250px] z-50">
+        <p className="font-bold text-slate-700 mb-2 border-b border-slate-100 pb-1">{label}</p>
+        {payload.map((entry: any) => {
+            const reason = entry.payload[`${entry.dataKey}_reason`];
+            const url = entry.payload[`${entry.dataKey}_url`];
+
+            return (
+              <div key={entry.name} className="mb-2 last:mb-0">
+                <div className="flex items-center gap-2">
+                   <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: entry.color }}></span>
+                   <span className="font-medium text-slate-800">{entry.name}: {entry.value}</span>
+                </div>
+                {/* Context */}
+                {reason && (
+                    <p className="text-slate-500 pl-4 mt-0.5 leading-snug">
+                        {reason}
+                    </p>
+                )}
+                {/* Source Link */}
+                {url && (
+                    <a 
+                        href={url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 pl-4 mt-1 text-[10px] text-indigo-500 hover:text-indigo-700 hover:underline"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        Verify Source <ExternalLink size={10} />
+                    </a>
+                )}
+              </div>
+            );
+        })}
       </div>
     );
   }
@@ -33,33 +51,34 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 
 export const TrendChart: React.FC<TrendChartProps> = ({ politicians }) => {
   
-  // To chart multiple lines with potentially different time points, we need to unify the timeline
-  // or just use the longest history if we assume sync. 
-  // For this implementation, we will merge data based on index for simplicity, 
-  // but ideally we'd map by Date.
-  
-  // We'll take the history of the first politician as the "master" timeline for X-axis structure
-  // if roughly synced, or just flatten all unique dates.
-  
-  // A simpler approach for the visualization:
-  // Create a unified set of data points based on the longest history.
-  
-  const maxHistory = Math.max(...politicians.map(p => p.history.length));
-  
-  const chartData = Array.from({ length: maxHistory }, (_, i) => {
-    const point: any = {};
-    
-    politicians.forEach(p => {
-      // Get the item at index i (or the last one if i is out of bounds for this pol, though we try to sync)
-      const item = p.history[i];
-      if (item) {
-          point[p.id] = item.score;
-          point[`${p.id}_reason`] = item.reason;
-          // Use the date from the first politician found at this index as the label
-          if (!point.time) point.time = item.time;
-      }
-    });
-    return point;
+  // 1. Collect all unique dates from all politicians
+  const allDates = new Set<string>();
+  politicians.forEach(p => {
+      p.history.forEach(h => {
+          if (h.time) allDates.add(h.time);
+      });
+  });
+
+  // 2. Sort dates chronologically
+  const sortedDates = Array.from(allDates).sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+
+  // 3. Construct chart data points ensuring alignment
+  const chartData = sortedDates.map(date => {
+      const point: any = { time: date };
+      
+      politicians.forEach(p => {
+          // Find if this politician has an entry for this specific date
+          const entry = p.history.find(h => h.time === date);
+          
+          if (entry) {
+              point[p.id] = entry.score;
+              point[`${p.id}_reason`] = entry.reason;
+              point[`${p.id}_url`] = entry.sourceUrl;
+          } else {
+              // Optional: Interpolate or leave undefined for broken lines. 
+          }
+      });
+      return point;
   });
 
   return (
@@ -71,15 +90,26 @@ export const TrendChart: React.FC<TrendChartProps> = ({ politicians }) => {
             dataKey="time" 
             tick={{ fontSize: 10, fill: '#64748b' }} 
             tickFormatter={(val) => {
-                // If val is YYYY-MM-DD, show MM-DD
-                if (val && val.length > 5) return val.substring(5);
-                return val;
+                // Format YYYY-MM-DD to cleaner format like "Oct 24"
+                if (!val) return "";
+                const date = new Date(val);
+                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
             }}
             interval="preserveStartEnd"
+            minTickGap={30}
           />
           <YAxis domain={['auto', 'auto']} hide />
           <Tooltip content={<CustomTooltip />} />
-          <Legend wrapperStyle={{ paddingTop: '10px', fontSize: '12px' }} />
+          <Legend wrapperStyle={{ paddingTop: '5px', fontSize: '12px' }} />
+          <Brush 
+              dataKey="time" 
+              height={30} 
+              stroke="#cbd5e1" 
+              tickFormatter={(val) => {
+                  const date = new Date(val);
+                  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+              }}
+          />
           {politicians.map((p) => (
             <Line
               key={p.id}
@@ -90,7 +120,7 @@ export const TrendChart: React.FC<TrendChartProps> = ({ politicians }) => {
               strokeWidth={2}
               dot={true}
               activeDot={{ r: 5 }}
-              connectNulls
+              connectNulls={true} // Connects lines even if data is missing for some dates
               animationDuration={1000}
             />
           ))}

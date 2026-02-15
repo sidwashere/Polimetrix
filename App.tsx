@@ -1,61 +1,162 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { INITIAL_POLITICIANS, INITIAL_SOURCES, MOCK_HEADLINES } from './constants';
 import { Politician, Source, NewsEvent, SimulationConfig, SentimentType } from './types';
-import { fetchAIEvent, fetchSuggestedSources, fetchHistoricalStats } from './services/geminiService';
+import { fetchAIEvent, fetchSuggestedSources, fetchHistoricalStats, fetchCandidateImage } from './services/geminiService';
 import { Ticker } from './components/Ticker';
 import { LeaderboardCard } from './components/LeaderboardCard';
 import { TrendChart } from './components/TrendChart';
 import { LiveFeed } from './components/LiveFeed';
 import { SourceManager } from './components/SourceManager';
 import { CandidateManager } from './components/CandidateManager';
-import { BarChart3, Settings, Play, Pause, Activity, AlertTriangle, Search, Database } from 'lucide-react';
+import { BarChart3, Settings, Play, Pause, Activity, AlertTriangle, Search, Database, Loader2, RotateCcw, X } from 'lucide-react';
+
+const STORAGE_KEYS = {
+    POLITICIANS: 'poli_politicians_v1',
+    SOURCES: 'poli_sources_v1',
+    FEED: 'poli_feed_v1',
+    CONFIG: 'poli_config_v1',
+    POTENTIAL_SOURCES: 'poli_potential_sources_v1'
+};
 
 export default function App() {
-  const [politicians, setPoliticians] = useState<Politician[]>(INITIAL_POLITICIANS);
+  // Load initial state from Local Storage or Constants
+  const [politicians, setPoliticians] = useState<Politician[]>(() => {
+      const saved = localStorage.getItem(STORAGE_KEYS.POLITICIANS);
+      return saved ? JSON.parse(saved) : INITIAL_POLITICIANS;
+  });
+
+  const [sources, setSources] = useState<Source[]>(() => {
+      const saved = localStorage.getItem(STORAGE_KEYS.SOURCES);
+      return saved ? JSON.parse(saved) : INITIAL_SOURCES;
+  });
+
+  const [feed, setFeed] = useState<NewsEvent[]>(() => {
+      const saved = localStorage.getItem(STORAGE_KEYS.FEED);
+      return saved ? JSON.parse(saved) : [];
+  });
+
+  const [potentialSources, setPotentialSources] = useState<Source[]>(() => {
+      const saved = localStorage.getItem(STORAGE_KEYS.POTENTIAL_SOURCES);
+      return saved ? JSON.parse(saved) : [];
+  });
+  
+  const [config, setConfig] = useState<SimulationConfig>(() => {
+      const saved = localStorage.getItem(STORAGE_KEYS.CONFIG);
+      const defaults = {
+        scanInterval: 8000, 
+        isPaused: false,
+        useAI: false,
+        autoRefreshCandidates: true // Default to true
+      };
+      return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
+  });
+
   const [candidateFilter, setCandidateFilter] = useState('');
-  const [sources, setSources] = useState<Source[]>(INITIAL_SOURCES);
-  const [potentialSources, setPotentialSources] = useState<Source[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
-  const [feed, setFeed] = useState<NewsEvent[]>([]);
-  const [config, setConfig] = useState<SimulationConfig>({
-    scanInterval: 8000, // Slower interval to allow for processing
-    isPaused: false,
-    useAI: false
-  });
+  const [refreshingCandidateId, setRefreshingCandidateId] = useState<string | null>(null);
+  const [addingCandidateId, setAddingCandidateId] = useState<boolean>(false);
   const [isApiKeyMissing, setIsApiKeyMissing] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
-  // Check for API key on mount
+  // Persistence Effects
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEYS.POLITICIANS, JSON.stringify(politicians));
+  }, [politicians]);
+
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEYS.SOURCES, JSON.stringify(sources));
+  }, [sources]);
+
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEYS.FEED, JSON.stringify(feed.slice(0, 50)));
+  }, [feed]);
+
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEYS.POTENTIAL_SOURCES, JSON.stringify(potentialSources));
+  }, [potentialSources]);
+
+  useEffect(() => {
+      localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(config));
+  }, [config]);
+
+  // Check for API key on mount and re-validate/fetch missing data
   useEffect(() => {
     if (!process.env.API_KEY) {
       setIsApiKeyMissing(true);
       setConfig(prev => ({ ...prev, useAI: false }));
     } else {
         setConfig(prev => ({ ...prev, useAI: true }));
-        // Trigger historical fetch
+        // Trigger check for missing data on all candidates
         loadHistoricalContext();
     }
   }, []);
 
+  // Updated to use SEQUENTIAL requests to avoid 429 Errors
   const loadHistoricalContext = async () => {
     setIsHistoryLoading(true);
-    const updatedPoliticians = [...INITIAL_POLITICIANS];
     
-    // We'll fetch history for the top 3 default candidates to save tokens/time on init
-    // In a real app, this would be a backend job
-    const promises = updatedPoliticians.slice(0, 3).map(async (pol) => {
-        const history = await fetchHistoricalStats(pol);
-        if (history && history.length > 0) {
-            pol.history = history;
-            // Update current score to the last point in history
-            pol.score = history[history.length - 1].score;
-        }
-        return pol;
-    });
+    // Create a copy of IDs to iterate over. We use the initial state 'politicians'
+    // available in closure, which is fine for the mount effect.
+    // If we wanted to ensure we had absolutely latest, we'd use a ref, but IDs rarely change on mount.
+    const targets = [...politicians];
 
-    await Promise.all(promises);
-    setPoliticians(updatedPoliticians);
+    for (const pol of targets) {
+        // Double check against current state in case something changed rapidly
+        // This also ensures we don't overwrite user edits if possible, though this runs on mount.
+        const hasHistory = pol.history.some(h => h.time !== '');
+        const hasPlaceholderImage = pol.image.includes('ui-avatars.com') || pol.image.includes('wikipedia'); 
+
+        if (hasHistory && !hasPlaceholderImage) {
+            continue;
+        }
+
+        try {
+            // Process one politician at a time
+            const fetchPromises = [];
+            if (!hasHistory) fetchPromises.push(fetchHistoricalStats(pol));
+            else fetchPromises.push(Promise.resolve(null));
+
+            if (hasPlaceholderImage) fetchPromises.push(fetchCandidateImage(pol.name));
+            else fetchPromises.push(Promise.resolve(null));
+
+            // Execute fetches for THIS politician
+            const [history, image] = await Promise.all(fetchPromises);
+
+            // Update State Incrementally
+            setPoliticians(prev => prev.map(p => {
+                if (p.id === pol.id) {
+                    return {
+                        ...p,
+                        history: history && history.length > 0 ? history : p.history,
+                        score: history && history.length > 0 ? history[history.length - 1].score : p.score,
+                        image: image || p.image
+                    };
+                }
+                return p;
+            }));
+
+            // Force a small delay to respect rate limits between candidates
+            await new Promise(r => setTimeout(r, 2000));
+
+        } catch (e) {
+            console.error(`Error loading context for ${pol.name}`, e);
+        }
+    }
+    
     setIsHistoryLoading(false);
+  };
+
+  const handleResetData = () => {
+      if (confirm("Are you sure you want to reset all data? This will clear all tracked stats, sources, and history.")) {
+          localStorage.removeItem(STORAGE_KEYS.POLITICIANS);
+          localStorage.removeItem(STORAGE_KEYS.SOURCES);
+          localStorage.removeItem(STORAGE_KEYS.FEED);
+          localStorage.removeItem(STORAGE_KEYS.POTENTIAL_SOURCES);
+          localStorage.removeItem(STORAGE_KEYS.CONFIG);
+          
+          window.location.reload();
+      }
   };
 
   const generateMockEvent = (pols: Politician[], srcs: Source[]): NewsEvent => {
@@ -84,7 +185,14 @@ export default function App() {
       headline: `${pol.name} ${template}`,
       sentiment,
       impact: actualImpact,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      timestamp: new Date().toLocaleString('en-US', { 
+          month: 'short', 
+          day: 'numeric', 
+          hour: '2-digit', 
+          minute: '2-digit' 
+      }),
+      // Placeholder for mock events - in prod this should be real
+      url: 'https://news.google.com' 
     };
   };
 
@@ -92,10 +200,8 @@ export default function App() {
     setFeed(prev => [event, ...prev].slice(0, 50));
 
     setPoliticians(prevPols => {
-      // Handle updates for ALL politicians to keep history aligned
       return prevPols.map(p => {
         if (p.id !== event.politicianId) {
-            // No change for others in live loop, or we could duplicate last point
             return p;
         }
 
@@ -106,14 +212,17 @@ export default function App() {
         const newScore = parseFloat((p.score + change).toFixed(2));
         
         // Append new live point to history
+        const today = new Date().toISOString().split('T')[0];
+        
         const newHistoryItem = { 
-            time: new Date().toISOString().split('T')[0], // Just date for graph simplicity
+            time: today,
             score: newScore,
-            reason: "Live Update: " + event.headline
+            reason: "Live: " + event.headline,
+            sourceUrl: event.url // Persist URL to history
         };
         
         // Keep history size manageable
-        const newHistory = [...p.history, newHistoryItem].slice(-30);
+        const newHistory = [...p.history, newHistoryItem].slice(-50); 
 
         return {
           ...p,
@@ -126,10 +235,9 @@ export default function App() {
   }, []);
 
   const runSimulationStep = async () => {
-    if (config.isPaused || isHistoryLoading) return; // Wait for history to load first
+    if (config.isPaused || isHistoryLoading) return;
 
     let event: NewsEvent | null = null;
-    // Pick a random politician to 'scan' for news
     const targetPolitician = politicians[Math.floor(Math.random() * politicians.length)];
 
     if (config.useAI && !isApiKeyMissing) {
@@ -145,14 +253,13 @@ export default function App() {
                headline: aiData.headline || 'Update received',
                sentiment: aiData.sentiment || 'neutral',
                impact: aiData.impact || 0.5,
-               timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+               timestamp: aiData.timestamp || new Date().toLocaleString(),
                url: aiData.url
            } as NewsEvent;
        }
     } 
     
-    // Fallback if AI didn't return (e.g. no recent news found) or dev mode
-    if (!event) {
+    if (!event && !config.useAI) {
         event = generateMockEvent(politicians, sources);
     }
 
@@ -182,21 +289,7 @@ export default function App() {
        }
     } else {
         await new Promise(r => setTimeout(r, 1500));
-        const MOCK_DISCOVERIES = [
-            { name: "Kahawa Tungu", type: "blog" as const, weight: 1.8 },
-            { name: "Tuko.co.ke", type: "news" as const, weight: 1.5 },
-            { name: "KBC Channel 1", type: "tv" as const, weight: 2.0 }
-        ];
-        const random = MOCK_DISCOVERIES[Math.floor(Math.random() * MOCK_DISCOVERIES.length)];
-        if (!sources.find(s => s.name === random.name)) {
-            setPotentialSources(prev => [...prev, {
-                id: `mock-${Date.now()}`,
-                name: random.name,
-                type: random.type,
-                weight: random.weight,
-                active: true
-            }]);
-        }
+        setIsScanning(false);
     }
     setIsScanning(false);
   };
@@ -210,12 +303,87 @@ export default function App() {
       setPotentialSources(prev => prev.filter(p => p.id !== id));
   };
   
-  const handleAddCandidate = (candidate: Politician) => {
+  const handleAddCandidate = async (candidate: Politician) => {
       setPoliticians(prev => [...prev, candidate]);
+      
+      if (config.useAI && !isApiKeyMissing) {
+          setAddingCandidateId(true);
+          try {
+             // Fetch real data
+             const [history, image] = await Promise.all([
+                 fetchHistoricalStats(candidate),
+                 fetchCandidateImage(candidate.name)
+             ]);
+
+             setPoliticians(prev => prev.map(p => {
+                 if (p.id === candidate.id) {
+                     return {
+                         ...p,
+                         history: history && history.length > 0 ? history : p.history,
+                         score: history && history.length > 0 ? history[history.length - 1].score : p.score,
+                         image: image || p.image
+                     };
+                 }
+                 return p;
+             }));
+          } catch(e) {
+              console.error("Failed to analyze new candidate", e);
+          } finally {
+              setAddingCandidateId(false);
+          }
+      }
   };
 
   const handleDeleteCandidate = (id: string) => {
       setPoliticians(prev => prev.filter(p => p.id !== id));
+  };
+
+  const handleRefreshCandidate = async (id: string) => {
+      const pol = politicians.find(p => p.id === id);
+      if (!pol || refreshingCandidateId) return;
+
+      setRefreshingCandidateId(id);
+
+      try {
+          if (config.useAI && !isApiKeyMissing) {
+              const aiData = await fetchAIEvent(pol, sources);
+              if (aiData && aiData.headline) {
+                   const event: NewsEvent = {
+                       id: Date.now(),
+                       politicianId: pol.id,
+                       sourceId: 'google-search-manual',
+                       sourceName: aiData.sourceName || 'Web Search',
+                       headline: aiData.headline,
+                       sentiment: aiData.sentiment || 'neutral',
+                       impact: aiData.impact || 0.5,
+                       timestamp: aiData.timestamp || new Date().toLocaleString(),
+                       url: aiData.url
+                   };
+                   processEvent(event);
+              }
+              
+               const [history, image] = await Promise.all([
+                 fetchHistoricalStats(pol),
+                 fetchCandidateImage(pol.name)
+             ]);
+
+             setPoliticians(prev => prev.map(p => {
+                 if (p.id === id) {
+                     return {
+                         ...p,
+                         history: history && history.length > 0 ? history : p.history,
+                         score: history && history.length > 0 ? history[history.length - 1].score : p.score,
+                         image: image || p.image
+                     };
+                 }
+                 return p;
+             }));
+          }
+      } catch (e) {
+          console.error("Refresh failed", e);
+      } finally {
+          setRefreshingCandidateId(null);
+      }
   };
 
   const togglePause = () => setConfig(prev => ({ ...prev, isPaused: !prev.isPaused }));
@@ -230,7 +398,7 @@ export default function App() {
   const sortedPoliticians = [...filteredPoliticians].sort((a, b) => b.score - a.score);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 pb-12">
+    <div className="min-h-screen bg-slate-50 text-slate-900 pb-12 relative">
       {/* Navbar */}
       <nav className="bg-slate-900 text-white shadow-lg sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -240,13 +408,67 @@ export default function App() {
                     <span className="text-xl font-bold tracking-tight">PoliMetric <span className="text-slate-400 font-normal">| Kenya 2027</span></span>
                     <span className="ml-2 text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full animate-pulse font-bold tracking-wider">LIVE</span>
                 </div>
-                <div className="flex items-center space-x-4">
+                <div className="flex items-center space-x-4 relative">
+                     {addingCandidateId && (
+                         <div className="flex items-center gap-2 text-indigo-300 text-xs">
+                             <Loader2 size={12} className="animate-spin" />
+                             Analyzing New Candidate...
+                         </div>
+                     )}
                      <button 
                         onClick={togglePause}
                         className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${config.isPaused ? 'bg-amber-600 hover:bg-amber-700' : 'bg-slate-700 hover:bg-slate-600'}`}
                      >
                         {config.isPaused ? <><Play size={14}/> Resume</> : <><Pause size={14}/> Pause</>}
                      </button>
+                     
+                     <button 
+                        onClick={() => setShowSettings(!showSettings)}
+                        className={`p-2 rounded-md text-slate-300 hover:bg-slate-700 hover:text-white transition-colors ${showSettings ? 'bg-slate-700 text-white' : ''}`}
+                        title="Settings"
+                     >
+                        <Settings size={18} />
+                     </button>
+
+                     <button
+                        onClick={handleResetData}
+                        className="flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium bg-rose-900/50 hover:bg-rose-900 text-rose-200 transition-colors"
+                        title="Reset all tracked data"
+                     >
+                         <RotateCcw size={14} />
+                         Reset
+                     </button>
+
+                     {/* Settings Dropdown */}
+                     {showSettings && (
+                        <div className="absolute top-12 right-0 w-72 bg-white shadow-xl rounded-xl border border-slate-200 p-4 z-50 animate-in fade-in slide-in-from-top-2 text-slate-800">
+                            <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
+                                <h4 className="font-bold text-slate-700 flex items-center gap-2 text-sm">
+                                    <Settings size={14} /> Configuration
+                                </h4>
+                                <button onClick={() => setShowSettings(false)} className="text-slate-400 hover:text-slate-600">
+                                    <X size={14} />
+                                </button>
+                            </div>
+                            <div className="space-y-4">
+                                <div className="flex items-center justify-between">
+                                    <div className="flex flex-col">
+                                        <span className="text-sm font-medium text-slate-700">Auto-Refresh Stats</span>
+                                        <span className="text-[10px] text-slate-400">Fetch new data every 30m</span>
+                                    </div>
+                                    <button 
+                                        onClick={() => setConfig(prev => ({...prev, autoRefreshCandidates: !prev.autoRefreshCandidates}))}
+                                        className={`w-10 h-5 rounded-full relative transition-colors ${config.autoRefreshCandidates ? 'bg-indigo-600' : 'bg-slate-300'}`}
+                                    >
+                                        <span className={`absolute top-1 left-1 w-3 h-3 bg-white rounded-full transition-transform ${config.autoRefreshCandidates ? 'translate-x-5' : 'translate-x-0'}`} />
+                                    </button>
+                                </div>
+                                <div className="text-[10px] text-slate-400 bg-slate-50 p-2 rounded">
+                                    Note: Auto-refresh performs a deep analysis of each candidate using current sources.
+                                </div>
+                            </div>
+                        </div>
+                     )}
                 </div>
             </div>
         </div>
@@ -301,7 +523,15 @@ export default function App() {
                 {sortedPoliticians.length > 0 ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {sortedPoliticians.map((pol, idx) => (
-                            <LeaderboardCard key={pol.id} politician={pol} rank={idx + 1} />
+                            <LeaderboardCard 
+                                key={pol.id} 
+                                politician={pol} 
+                                rank={idx + 1} 
+                                onRefresh={handleRefreshCandidate}
+                                onRemove={handleDeleteCandidate}
+                                isRefreshing={refreshingCandidateId === pol.id}
+                                autoRefreshEnabled={config.autoRefreshCandidates}
+                            />
                         ))}
                     </div>
                 ) : (
@@ -315,7 +545,7 @@ export default function App() {
                     <div className="flex justify-between items-center mb-6">
                         <h3 className="font-bold text-lg text-slate-800 flex items-center gap-2">
                             <BarChart3 size={20} className="text-indigo-600"/>
-                            6-Month Trend Velocity
+                            60-Day Trend Velocity
                         </h3>
                         <div className="flex gap-2">
                            <span className="text-xs font-medium px-2 py-1 bg-slate-100 rounded text-slate-600">Historical & Live</span>
@@ -323,7 +553,7 @@ export default function App() {
                     </div>
                     {isHistoryLoading ? (
                         <div className="h-[300px] flex items-center justify-center text-slate-400 text-sm italic">
-                            Analyzing 6 months of political data...
+                            Analyzing recent political data...
                         </div>
                     ) : (
                         <TrendChart politicians={politicians} />

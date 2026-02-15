@@ -1,13 +1,59 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Politician } from '../types';
-import { TrendingUp, TrendingDown, Minus, Quote } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, Quote, RefreshCw, Trash2, Loader2 } from 'lucide-react';
 
 interface LeaderboardCardProps {
   politician: Politician;
   rank: number;
+  onRefresh?: (id: string) => void;
+  onRemove?: (id: string) => void;
+  isRefreshing?: boolean;
+  autoRefreshEnabled?: boolean;
 }
 
-export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ politician, rank }) => {
+export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ 
+  politician, 
+  rank, 
+  onRefresh, 
+  onRemove,
+  isRefreshing = false,
+  autoRefreshEnabled = false
+}) => {
+  // State for visual flash animation on update
+  const prevScore = useRef(politician.score);
+  const [updateFlash, setUpdateFlash] = useState<'up' | 'down' | null>(null);
+
+  // Automatic refresh timer (30 minutes)
+  useEffect(() => {
+    if (!autoRefreshEnabled || !onRefresh) return;
+
+    // 30 minutes in milliseconds
+    const REFRESH_INTERVAL = 30 * 60 * 1000; 
+
+    // Simple interval to trigger refresh
+    const simpleInterval = setInterval(() => {
+        onRefresh(politician.id);
+    }, REFRESH_INTERVAL);
+
+    return () => clearInterval(simpleInterval);
+  }, [autoRefreshEnabled, onRefresh, politician.id]);
+
+  // Detect score changes for animation
+  useEffect(() => {
+      // Small threshold to avoid floating point flicker, though usually distinct
+      if (Math.abs(politician.score - prevScore.current) > 0.001) {
+          const isUp = politician.score > prevScore.current;
+          setUpdateFlash(isUp ? 'up' : 'down');
+          prevScore.current = politician.score;
+
+          const timer = setTimeout(() => {
+              setUpdateFlash(null);
+          }, 2000); // Highlight lasts 2 seconds
+
+          return () => clearTimeout(timer);
+      }
+  }, [politician.score]);
+
   // Calculate trend styling
   const isPositive = politician.trend > 0;
   const isNegative = politician.trend < 0;
@@ -20,10 +66,34 @@ export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ politician, ra
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 transition-all duration-300 hover:shadow-md relative overflow-hidden group flex flex-col h-full">
+      
+      {/* Action Buttons */}
+      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 p-1 rounded-lg backdrop-blur-sm z-10">
+        {onRefresh && (
+            <button 
+                onClick={() => onRefresh(politician.id)}
+                disabled={isRefreshing}
+                className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
+                title="Refresh stats and fetch latest news"
+            >
+                <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
+            </button>
+        )}
+        {onRemove && (
+            <button 
+                onClick={() => onRemove(politician.id)}
+                className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-md transition-colors"
+                title="Remove candidate"
+            >
+                <Trash2 size={14} />
+            </button>
+        )}
+      </div>
+
       <div className="flex justify-between items-start mb-3">
         <div className="flex items-center space-x-3">
           <div className="relative">
-            <div className="h-12 w-12 rounded-full overflow-hidden border-2 border-slate-100 shadow-sm">
+            <div className="h-12 w-12 rounded-full overflow-hidden border-2 border-slate-100 shadow-sm bg-slate-100">
               <img src={politician.image} alt={politician.name} className="w-full h-full object-cover" />
             </div>
             <div className="absolute -bottom-1 -right-1 bg-slate-900 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold">
@@ -63,13 +133,27 @@ export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ politician, ra
           <div className="flex items-end justify-between">
             <div>
               <p className="text-[10px] text-slate-400 uppercase tracking-wider font-bold mb-1">Sentiment Index</p>
-              <div className="flex items-baseline space-x-2">
-                <span className="text-3xl font-bold text-slate-900 tracking-tight">{politician.score.toFixed(2)}</span>
-                <span className={`text-xs font-bold flex items-center ${trendColor} bg-slate-50 px-1.5 py-0.5 rounded`}>
+              
+              {/* Score Display with Animation Wrapper */}
+              <div className={`flex items-center space-x-2 px-2 -ml-2 py-1 rounded-lg transition-all duration-700 ease-out ${
+                  updateFlash === 'up' ? 'bg-emerald-100' :
+                  updateFlash === 'down' ? 'bg-rose-100' :
+                  'bg-transparent'
+              }`}>
+                <span className={`text-3xl font-bold tracking-tight transition-colors duration-300 ${
+                    updateFlash === 'up' ? 'text-emerald-700' :
+                    updateFlash === 'down' ? 'text-rose-700' :
+                    'text-slate-900'
+                }`}>
+                    {politician.score.toFixed(2)}
+                </span>
+                
+                <span className={`text-xs font-bold flex items-center ${trendColor} bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100`}>
                   {trendIcon}
                   <span className="ml-1">{Math.abs(politician.trend).toFixed(2)}</span>
                 </span>
               </div>
+
             </div>
             
             <div className="w-1/3">
@@ -86,6 +170,15 @@ export const LeaderboardCard: React.FC<LeaderboardCardProps> = ({ politician, ra
             </div>
           </div>
       </div>
+      
+      {isRefreshing && (
+          <div className="absolute inset-0 bg-white/50 backdrop-blur-[1px] flex items-center justify-center z-20">
+              <div className="flex flex-col items-center gap-2">
+                  <Loader2 className="animate-spin text-indigo-600" size={24} />
+                  <span className="text-xs font-bold text-indigo-700">Updating Stats...</span>
+              </div>
+          </div>
+      )}
     </div>
   );
 };

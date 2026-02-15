@@ -125,14 +125,13 @@ export const CandidateManager: React.FC<CandidateManagerProps> = ({
                     <div className="text-[10px] text-slate-500">{candidate.party}</div>
                 </div>
              </div>
-             {candidate.isCustom && (
-                 <button 
-                    onClick={() => onDeleteCandidate(candidate.id)}
-                    className="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all"
-                 >
-                    <X size={14} />
-                 </button>
-             )}
+             <button 
+                onClick={() => onDeleteCandidate(candidate.id)}
+                className="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all"
+                title="Remove candidate"
+             >
+                <X size={14} />
+             </button>
           </div>
         ))}
       </div>

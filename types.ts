@@ -2,6 +2,7 @@ export interface HistoryItem {
   time: string;
   score: number;
   reason?: string; // Short context why the score changed (e.g. "Finance Bill Protests")
+  sourceUrl?: string; // Link to the source verifying this event
 }
 
 export interface Politician {
@@ -45,4 +46,5 @@ export interface SimulationConfig {
   scanInterval: number; // ms
   isPaused: boolean;
   useAI: boolean; // Whether to use Gemini or mock generator
+  autoRefreshCandidates: boolean; // Automatically refresh candidate stats every 30m
 }

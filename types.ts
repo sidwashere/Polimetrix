@@ -28,19 +28,6 @@ export interface Politician {
   slogan?: string;
   metrics?: PoliticianMetrics;
 }
-  id: string;
-  name: string;
-  role: string;
-  party: string;
-  score: number;
-  trend: number; // The difference from the last update
-  color: string;
-  image: string;
-  history: HistoryItem[];
-  isCustom?: boolean;
-  bio?: string;
-  slogan?: string;
-}
 
 export type SentimentType = 'positive' | 'negative' | 'neutral';
 

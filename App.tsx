@@ -1,12 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { INITIAL_POLITICIANS, INITIAL_SOURCES, MOCK_HEADLINES } from './constants';
-import { Politician, Source, NewsEvent, SimulationConfig, SentimentType } from './types';
-import {
-  fetchAIEvent,
-  fetchSuggestedSources,
-  fetchHistoricalStats,
-  fetchCandidateImage,
-} from './services/geminiService';
+import { INITIAL_POLITICIANS, INITIAL_SOURCES } from './constants';
+import { Politician, Source, NewsEvent, SimulationConfig, SentimentType, AIProviderConfig, ProviderType } from './types';
+import { getProvider, getDefaultAIProviderConfig, AIProvider } from './services/aiProvider';
+import { fetchRealNewsEvent } from './services/realTimeNewsFetcher';
 import {
   calculateAllMetrics,
   calculateAnalyticsSummary,
@@ -25,6 +21,8 @@ import { LiveFeed } from './components/LiveFeed';
 import { SourceManager } from './components/SourceManager';
 import { CandidateManager } from './components/CandidateManager';
 import { AnalyticsDashboard } from './components/AnalyticsDashboard';
+import { CandidateContextModal } from './components/CandidateContextModal';
+import { updateCandidateProfile } from './services/candidateProfileUpdater';
 import {
   BarChart3,
   Settings,
@@ -33,13 +31,19 @@ import {
   Activity,
   AlertTriangle,
   Search,
-  Database,
+  Database as DatabaseIcon,
   Loader2,
   RotateCcw,
   X,
   Brain,
   Clock,
   RefreshCw,
+  Server,
+  Cpu,
+  Globe,
+  CheckCircle2,
+  XCircle,
+  Zap,
 } from 'lucide-react';
 
 const STORAGE_KEYS = {
@@ -74,24 +78,53 @@ export default function App() {
 
   const [config, setConfig] = useState<SimulationConfig>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.CONFIG);
-    const defaults = {
-      scanInterval: 8000,
+    const defaults: SimulationConfig = {
+      scanInterval: 15000,
       isPaused: false,
-      useAI: false,
+      useAI: true,
       autoRefreshCandidates: true,
       historyWindowDays: 60,
+      aiProviderConfig: getDefaultAIProviderConfig(),
     };
     return saved ? { ...defaults, ...JSON.parse(saved) } : defaults;
   });
+
+  const [ollamaStatus, setOllamaStatus] = useState<{ ok: boolean; models: string[] }>({ ok: false, models: [] });
 
   const [candidateFilter, setCandidateFilter] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [refreshingCandidateId, setRefreshingCandidateId] = useState<string | null>(null);
   const [addingCandidateId, setAddingCandidateId] = useState<boolean>(false);
-  const [isApiKeyMissing, setIsApiKeyMissing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Get the current AI provider
+  const currentProvider = getProvider(config.aiProviderConfig);
+  const isProviderConfigured = currentProvider.isConfigured;
   const [showAnalytics, setShowAnalytics] = useState(false);
+  const [selectedPoliticianId, setSelectedPoliticianId] = useState<string | null>(null);
+
+  // Dynamic Profile Updates (runs periodically to check for party/slogan changes)
+  useEffect(() => {
+    if (!config.useAI || !isProviderConfigured || config.isPaused) return;
+
+    const runProfileUpdates = async () => {
+      // Pick one random politician to check per cycle to avoid spamming
+      const target = politicians[Math.floor(Math.random() * politicians.length)];
+      if (!target) return;
+
+      const updates = await updateCandidateProfile(target, config.aiProviderConfig);
+      if (updates) {
+        setPoliticians(prev => prev.map(p => p.id === target.id ? { ...p, ...updates } : p));
+      }
+    };
+
+    const interval = setInterval(runProfileUpdates, 60 * 60 * 1000); // Check every hour (staggered)
+    return () => clearInterval(interval);
+  }, [config, isProviderConfigured, politicians]);
+
+  const handleViewContext = (id: string) => setSelectedPoliticianId(id);
+  const handleCloseContext = () => setSelectedPoliticianId(null);
 
   // Persistence Effects - also save to database
   useEffect(() => {
@@ -119,16 +152,19 @@ export default function App() {
     database.setConfig(config);
   }, [config]);
 
-  // Check for API key on mount and re-validate/fetch missing data
+  // On mount: auto-detect provider and load data
   useEffect(() => {
-    if (!process.env.API_KEY) {
-      setIsApiKeyMissing(true);
-      setConfig((prev) => ({ ...prev, useAI: false }));
-    } else {
-      setConfig((prev) => ({ ...prev, useAI: true }));
-      // Trigger check for missing data on all candidates
-      loadHistoricalContext();
+    // Auto-detect best available provider from env
+    const envConfig = getDefaultAIProviderConfig();
+    if (envConfig.geminiApiKey) {
+      setConfig(prev => ({ ...prev, useAI: true, aiProviderConfig: { ...prev.aiProviderConfig, geminiApiKey: envConfig.geminiApiKey, provider: prev.aiProviderConfig.provider || 'gemini' } }));
     }
+    // Check Ollama availability
+    import('./services/providers/ollamaProvider').then(({ OllamaProvider }) => {
+      OllamaProvider.checkConnection(config.aiProviderConfig.ollamaUrl).then(setOllamaStatus);
+    });
+    // Load historical context
+    loadHistoricalContext();
   }, []);
 
   // Updated to use SEQUENTIAL requests to avoid 429 Errors
@@ -153,11 +189,12 @@ export default function App() {
 
       try {
         // Process one politician at a time
+        const provider = getProvider(config.aiProviderConfig);
         const fetchPromises = [];
-        if (!hasHistory) fetchPromises.push(fetchHistoricalStats(pol, config.historyWindowDays));
+        if (!hasHistory && provider.isConfigured) fetchPromises.push(provider.fetchHistory(pol, config.historyWindowDays));
         else fetchPromises.push(Promise.resolve(null));
 
-        if (hasPlaceholderImage) fetchPromises.push(fetchCandidateImage(pol.name));
+        if (hasPlaceholderImage && provider.isConfigured) fetchPromises.push(provider.fetchImage(pol.name));
         else fetchPromises.push(Promise.resolve(null));
 
         // Execute fetches for THIS politician
@@ -204,46 +241,7 @@ export default function App() {
     }
   };
 
-  const generateMockEvent = (pols: Politician[], srcs: Source[]): NewsEvent => {
-    const pol = pols[Math.floor(Math.random() * pols.length)];
-    const src = srcs[Math.floor(Math.random() * srcs.length)] || {
-      id: 'mock',
-      name: 'Unknown',
-      weight: 1,
-    };
-
-    // Weighted random sentiment
-    const r = Math.random();
-    let sentiment: SentimentType = 'neutral';
-    if (r < 0.4) sentiment = 'positive';
-    else if (r < 0.8) sentiment = 'negative';
-
-    const templates = MOCK_HEADLINES[sentiment];
-    const template = templates[Math.floor(Math.random() * templates.length)];
-
-    // Impact calculation
-    let baseImpact = Math.random() * 1.5 + 0.5;
-    if (sentiment === 'neutral') baseImpact = 0.1;
-    const actualImpact = parseFloat((baseImpact * (src.weight / 2)).toFixed(2));
-
-    return {
-      id: Date.now(),
-      politicianId: pol.id,
-      sourceId: src.id,
-      sourceName: src.name,
-      headline: `${pol.name} ${template}`,
-      sentiment,
-      impact: actualImpact,
-      timestamp: new Date().toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      // Placeholder for mock events - in prod this should be real
-      url: 'https://news.google.com',
-    };
-  };
+  // Mock event generation removed — production mode uses real data only
 
   const processEvent = useCallback((event: NewsEvent) => {
     setFeed((prev) => [event, ...prev].slice(0, 50));
@@ -285,34 +283,32 @@ export default function App() {
 
   const runSimulationStep = async () => {
     if (config.isPaused || isHistoryLoading) return;
+    if (politicians.length === 0) return;
 
-    let event: NewsEvent | null = null;
     const targetPolitician = politicians[Math.floor(Math.random() * politicians.length)];
+    const provider = getProvider(config.aiProviderConfig);
 
-    if (config.useAI && !isApiKeyMissing) {
-      // Real-Time Google Search via Gemini
-      const aiData = await fetchAIEvent(targetPolitician, sources);
+    try {
+      // Always use real-time news fetching — no mock data
+      const aiData = await fetchRealNewsEvent(targetPolitician, sources, provider);
 
       if (aiData && aiData.headline) {
-        event = {
+        const event: NewsEvent = {
           id: Date.now(),
           politicianId: targetPolitician.id,
-          sourceId: 'google-search-gen',
-          sourceName: aiData.sourceName || 'Web Search',
+          sourceId: `${config.aiProviderConfig.provider}-live`,
+          sourceName: aiData.sourceName || provider.name,
           headline: aiData.headline || 'Update received',
           sentiment: aiData.sentiment || 'neutral',
           impact: aiData.impact || 0.5,
           timestamp: aiData.timestamp || new Date().toLocaleString(),
           url: aiData.url,
-        } as NewsEvent;
+        };
+        processEvent(event);
       }
+    } catch (err) {
+      console.error('[App] Real-time fetch error:', err);
     }
-
-    if (!event && !config.useAI) {
-      event = generateMockEvent(politicians, sources);
-    }
-
-    if (event) processEvent(event);
   };
 
   // Simulation Loop
@@ -324,8 +320,9 @@ export default function App() {
   // Handlers
   const handleScanForSources = async () => {
     setIsScanning(true);
-    if (config.useAI && !isApiKeyMissing) {
-      const newSuggestions = await fetchSuggestedSources(sources);
+    const provider = getProvider(config.aiProviderConfig);
+    if (provider.isConfigured) {
+      const newSuggestions = await provider.fetchSuggestedSources(sources);
       if (newSuggestions && newSuggestions.length > 0) {
         const newPotentials = newSuggestions.map(
           (s) =>
@@ -341,7 +338,6 @@ export default function App() {
       }
     } else {
       await new Promise((r) => setTimeout(r, 1500));
-      setIsScanning(false);
     }
     setIsScanning(false);
   };
@@ -357,13 +353,14 @@ export default function App() {
 
   const handleAddCandidate = async (candidate: Politician) => {
     setPoliticians((prev) => [...prev, candidate]);
+    const provider = getProvider(config.aiProviderConfig);
 
-    if (config.useAI && !isApiKeyMissing) {
+    if (provider.isConfigured) {
       setAddingCandidateId(true);
       try {
         const [history, image] = await Promise.all([
-          fetchHistoricalStats(candidate, config.historyWindowDays),
-          fetchCandidateImage(candidate.name),
+          provider.fetchHistory(candidate, config.historyWindowDays),
+          provider.fetchImage(candidate.name),
         ]);
 
         setPoliticians((prev) =>
@@ -396,16 +393,17 @@ export default function App() {
     if (!pol || refreshingCandidateId) return;
 
     setRefreshingCandidateId(id);
+    const provider = getProvider(config.aiProviderConfig);
 
     try {
-      if (config.useAI && !isApiKeyMissing) {
-        const aiData = await fetchAIEvent(pol, sources);
+      if (provider.isConfigured) {
+        const aiData = await fetchRealNewsEvent(pol, sources, provider);
         if (aiData && aiData.headline) {
           const event: NewsEvent = {
             id: Date.now(),
             politicianId: pol.id,
-            sourceId: 'google-search-manual',
-            sourceName: aiData.sourceName || 'Web Search',
+            sourceId: `${config.aiProviderConfig.provider}-manual`,
+            sourceName: aiData.sourceName || provider.name,
             headline: aiData.headline,
             sentiment: aiData.sentiment || 'neutral',
             impact: aiData.impact || 0.5,
@@ -416,8 +414,8 @@ export default function App() {
         }
 
         const [history, image] = await Promise.all([
-          fetchHistoricalStats(pol, config.historyWindowDays),
-          fetchCandidateImage(pol.name),
+          provider.fetchHistory(pol, config.historyWindowDays),
+          provider.fetchImage(pol.name),
         ]);
 
         setPoliticians((prev) =>
@@ -527,7 +525,7 @@ export default function App() {
 
               {/* Settings Dropdown */}
               {showSettings && (
-                <div className="absolute top-12 right-0 w-72 bg-white shadow-xl rounded-xl border border-slate-200 p-4 z-50 animate-in fade-in slide-in-from-top-2 text-slate-800">
+                <div className="absolute top-12 right-0 w-80 bg-white shadow-xl rounded-xl border border-slate-200 p-4 z-50 text-slate-800" style={{ maxHeight: '80vh', overflowY: 'auto' }}>
                   <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
                     <h4 className="font-bold text-slate-700 flex items-center gap-2 text-sm">
                       <Settings size={14} /> Configuration
@@ -540,6 +538,127 @@ export default function App() {
                     </button>
                   </div>
                   <div className="space-y-4">
+                    {/* AI Provider Selection */}
+                    <div>
+                      <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">AI Provider</span>
+                      <div className="mt-2 space-y-1.5">
+                        {[
+                          { key: 'gemini' as ProviderType, label: 'Gemini (Google)', icon: <Globe size={13} />, configured: !!config.aiProviderConfig.geminiApiKey },
+                          { key: 'ollama' as ProviderType, label: `Ollama (Local)`, icon: <Server size={13} />, configured: ollamaStatus.ok },
+                          { key: 'huggingface' as ProviderType, label: 'HuggingFace (Free)', icon: <Cpu size={13} />, configured: !!config.aiProviderConfig.huggingfaceApiKey },
+                          { key: 'openrouter' as ProviderType, label: 'OpenRouter (Free)', icon: <Zap size={13} />, configured: !!config.aiProviderConfig.openrouterApiKey },
+                        ].map(p => (
+                          <button
+                            key={p.key}
+                            onClick={() => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, provider: p.key } }))}
+                            className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-all ${config.aiProviderConfig.provider === p.key
+                              ? 'bg-indigo-50 border border-indigo-300 text-indigo-700'
+                              : 'bg-slate-50 border border-slate-200 text-slate-600 hover:bg-slate-100'
+                              }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              {p.icon}
+                              {p.label}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              {p.configured ? <CheckCircle2 size={12} className="text-emerald-500" /> : <XCircle size={12} className="text-slate-300" />}
+                              {config.aiProviderConfig.provider === p.key && <span className="text-[9px] bg-indigo-600 text-white px-1.5 py-0.5 rounded-full">ACTIVE</span>}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Ollama Config */}
+                    {config.aiProviderConfig.provider === 'ollama' && (
+                      <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+                        <span className="text-xs font-bold text-slate-500">Ollama Settings</span>
+                        <div>
+                          <label className="text-[10px] text-slate-400">Server URL</label>
+                          <input
+                            type="text"
+                            value={config.aiProviderConfig.ollamaUrl}
+                            onChange={(e) => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, ollamaUrl: e.target.value } }))}
+                            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5 focus:border-indigo-500 focus:outline-none mt-0.5"
+                            placeholder="http://localhost:11434"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400">Model</label>
+                          <input
+                            type="text"
+                            value={config.aiProviderConfig.ollamaModel}
+                            onChange={(e) => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, ollamaModel: e.target.value } }))}
+                            className="w-full text-xs border border-slate-300 rounded px-2 py-1.5 focus:border-indigo-500 focus:outline-none mt-0.5"
+                            placeholder="llama3"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {ollamaStatus.ok ? (
+                            <><CheckCircle2 size={12} className="text-emerald-500" /><span className="text-[10px] text-emerald-600">Connected • {ollamaStatus.models.length} model(s)</span></>
+                          ) : (
+                            <><XCircle size={12} className="text-rose-400" /><span className="text-[10px] text-rose-500">Not connected</span></>
+                          )}
+                          <button
+                            onClick={async () => {
+                              const { OllamaProvider } = await import('./services/providers/ollamaProvider');
+                              const status = await OllamaProvider.checkConnection(config.aiProviderConfig.ollamaUrl);
+                              setOllamaStatus(status);
+                            }}
+                            className="text-[10px] text-indigo-600 hover:underline ml-auto"
+                          >
+                            Test
+                          </button>
+                        </div>
+                        {ollamaStatus.ok && ollamaStatus.models.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {ollamaStatus.models.slice(0, 6).map(m => (
+                              <button
+                                key={m}
+                                onClick={() => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, ollamaModel: m } }))}
+                                className={`text-[9px] px-1.5 py-0.5 rounded border ${config.aiProviderConfig.ollamaModel === m ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}
+                              >
+                                {m}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* HuggingFace Config */}
+                    {config.aiProviderConfig.provider === 'huggingface' && (
+                      <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+                        <span className="text-xs font-bold text-slate-500">HuggingFace API Key</span>
+                        <input
+                          type="password"
+                          value={config.aiProviderConfig.huggingfaceApiKey}
+                          onChange={(e) => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, huggingfaceApiKey: e.target.value } }))}
+                          className="w-full text-xs border border-slate-300 rounded px-2 py-1.5 focus:border-indigo-500 focus:outline-none"
+                          placeholder="hf_xxxxxxxxxxxxx"
+                        />
+                        <p className="text-[10px] text-slate-400">Free tier at huggingface.co/settings/tokens</p>
+                      </div>
+                    )}
+
+                    {/* OpenRouter Config */}
+                    {config.aiProviderConfig.provider === 'openrouter' && (
+                      <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2">
+                        <span className="text-xs font-bold text-slate-500">OpenRouter API Key</span>
+                        <input
+                          type="password"
+                          value={config.aiProviderConfig.openrouterApiKey}
+                          onChange={(e) => setConfig(prev => ({ ...prev, aiProviderConfig: { ...prev.aiProviderConfig, openrouterApiKey: e.target.value } }))}
+                          className="w-full text-xs border border-slate-300 rounded px-2 py-1.5 focus:border-indigo-500 focus:outline-none"
+                          placeholder="sk-or-xxxxxxxxxxxxx"
+                        />
+                        <p className="text-[10px] text-slate-400">Free tier at openrouter.ai/keys</p>
+                      </div>
+                    )}
+
+                    <hr className="border-slate-100" />
+
+                    {/* Existing settings */}
                     <div className="flex items-center justify-between">
                       <div className="flex flex-col">
                         <span className="text-sm font-medium text-slate-700">
@@ -586,8 +705,7 @@ export default function App() {
                       </select>
                     </div>
                     <div className="text-[10px] text-slate-400 bg-slate-50 p-2 rounded">
-                      Note: Auto-refresh performs a deep analysis of each candidate using current
-                      sources.
+                      Provider: <strong>{currentProvider.name}</strong> • {isProviderConfigured ? 'Configured ✓' : 'Not configured'}
                     </div>
                   </div>
                 </div>
@@ -600,13 +718,12 @@ export default function App() {
       {/* Ticker */}
       <Ticker events={feed} />
 
-      {/* API Key Warning */}
-      {isApiKeyMissing && (
+      {/* Provider Status Banner */}
+      {!isProviderConfigured && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-800 px-4 py-2 text-xs text-center flex items-center justify-center gap-2">
           <AlertTriangle size={14} />
           <span>
-            Production Mode Warning: API Key missing. Running in simulation mode. Add{' '}
-            <code>API_KEY</code> to environment to enable real-time Google Search data.
+            No AI provider configured. Open <strong>Settings</strong> to select a provider (Gemini, Ollama, HuggingFace, or OpenRouter). Real-time news fetching is active but sentiment analysis requires a provider.
           </span>
         </div>
       )}
@@ -631,14 +748,14 @@ export default function App() {
             <div className="flex items-center gap-2 justify-end">
               {isHistoryLoading ? (
                 <div className="flex items-center gap-2 text-amber-500">
-                  <Database size={14} className="animate-bounce" />
+                  <DatabaseIcon size={14} className="animate-bounce" />
                   <span className="text-sm font-medium">Backfilling History...</span>
                 </div>
               ) : (
                 <>
-                  <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                  <div className={`h-2 w-2 rounded-full ${isProviderConfigured ? 'bg-emerald-500' : 'bg-amber-400'} animate-pulse`}></div>
                   <span className="text-sm font-medium text-slate-700">
-                    Google Grounding Active
+                    {currentProvider.name} {isProviderConfigured ? '• Live' : '• Unconfigured'}
                   </span>
                 </>
               )}
@@ -667,6 +784,7 @@ export default function App() {
                     sentimentRatio={calculateSentimentRatio(pol.history)}
                     influenceScore={calculateInfluenceScore(pol.history, sources, feed)}
                     consistencyScore={calculateConsistencyScore(pol.history)}
+                    onViewContext={handleViewContext}
                   />
                 ))}
               </div>
@@ -775,6 +893,25 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Candidate Context Modal */}
+      {selectedPoliticianId && (
+        (() => {
+          const pol = politicians.find(p => p.id === selectedPoliticianId);
+          if (!pol) return null;
+          const metrics = calculateAllMetrics(pol, feed, sources);
+          return (
+            <CandidateContextModal
+              politician={pol}
+              metrics={metrics}
+              onClose={handleCloseContext}
+              config={config}
+              feed={feed}
+            />
+          );
+        })()
+      )}
     </div>
   );
 }
+

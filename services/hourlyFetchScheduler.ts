@@ -1,6 +1,7 @@
-import { Politician, NewsEvent, Source } from '../types';
+import { Politician, NewsEvent, Source, AIProviderConfig } from '../types';
 import { database, FetchSchedule } from './database';
-import { fetchAIEvent } from './geminiService';
+import { getProvider, AIProvider } from './aiProvider';
+import { fetchRealNewsEvent } from './realTimeNewsFetcher';
 
 export interface FetchResult {
   success: boolean;
@@ -15,6 +16,7 @@ class HourlyFetchScheduler {
   private isRunning: boolean = false;
   private politicians: Politician[] = [];
   private sources: Source[] = [];
+  private aiProvider: AIProvider | null = null;
   private onEventFetched: ((event: NewsEvent) => void) | null = null;
   private onScheduleUpdate: ((schedule: FetchSchedule) => void) | null = null;
   private fetchCount: number = 0;
@@ -23,17 +25,23 @@ class HourlyFetchScheduler {
   initialize(
     politicians: Politician[],
     sources: Source[],
+    aiProviderConfig: AIProviderConfig,
     onEventFetched: (event: NewsEvent) => void,
     onScheduleUpdate: (schedule: FetchSchedule) => void
   ): void {
     this.politicians = politicians;
     this.sources = sources;
+    this.aiProvider = getProvider(aiProviderConfig);
     this.onEventFetched = onEventFetched;
     this.onScheduleUpdate = onScheduleUpdate;
 
     const schedule = database.getFetchSchedule();
     this.fetchCount = schedule.fetchCount;
     this.lastFetchTime = schedule.lastFetchTime;
+  }
+
+  updateProvider(config: AIProviderConfig): void {
+    this.aiProvider = getProvider(config);
   }
 
   start(): void {
@@ -79,7 +87,9 @@ class HourlyFetchScheduler {
 
     for (const politician of this.politicians) {
       try {
-        const event = await fetchAIEvent(politician, this.sources);
+        const event = this.aiProvider
+          ? await fetchRealNewsEvent(politician, this.sources, this.aiProvider)
+          : null;
 
         if (event && event.headline) {
           const newsEvent: NewsEvent = {

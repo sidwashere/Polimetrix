@@ -1,4 +1,4 @@
-import { Politician, NewsEvent, Source, HistoryItem, SentimentType } from '../types';
+import { Politician, NewsEvent, Source, HistoryItem, SentimentType, AdvancedMetrics, SentimentBreakdown } from '../types';
 
 const DAYS_TO_KEEP = 60;
 
@@ -13,32 +13,7 @@ const filterByRecentDays = (history: HistoryItem[]): HistoryItem[] => {
   });
 };
 
-export interface AdvancedMetrics {
-  volatility: number;
-  momentum: number;
-  mediaFrequency: number;
-  sentimentRatio: number;
-  influenceScore: number;
-  audienceReach: number;
-  trendStrength: number;
-  consistencyScore: number;
-  prediction: {
-    nextWeek: number;
-    confidence: number;
-    trend: 'rising' | 'falling' | 'stable';
-  };
-  movingAverages: {
-    sma7: number;
-    sma14: number;
-    sma30: number;
-    ema12: number;
-  };
-  sentimentBreakdown: {
-    positive: number;
-    negative: number;
-    neutral: number;
-  };
-}
+
 
 export interface AnalyticsSummary {
   totalEvents: number;
@@ -144,10 +119,10 @@ export const calculateTrendStrength = (history: HistoryItem[]): number => {
   const rSquared =
     Math.pow(
       (n * sumXY - sumX * sumY) /
-        Math.sqrt(
-          (n * sumX2 - sumX * sumX) *
-            (n * reduceSum(scores.map((s) => Math.pow(s - sumY / n, 2))) - sumY * sumY)
-        ),
+      Math.sqrt(
+        (n * sumX2 - sumX * sumX) *
+        (n * reduceSum(scores.map((s) => Math.pow(s - sumY / n, 2))) - sumY * sumY)
+      ),
       2
     ) || 0;
 
@@ -257,7 +232,7 @@ export const calculateAllMetrics = (
 ): AdvancedMetrics => {
   const { history } = politician;
 
-  return {
+  const metrics: AdvancedMetrics = {
     volatility: calculateVolatility(history),
     momentum: calculateMomentum(history),
     mediaFrequency: calculateMediaFrequency(feed, politician.id),
@@ -274,7 +249,72 @@ export const calculateAllMetrics = (
       ema12: calculateEMA(history, 12),
     },
     sentimentBreakdown: calculateSentimentBreakdown(history),
+    coalitionScore: calculateCoalitionScore(politician),
+    endorsementScore: calculateEndorsementScore(politician),
+    controversyPenalty: calculateControversyPenalty(history),
+    regionalDiversity: calculateRegionalDiversity(politician, feed),
+    messageConsistency: calculateConsistencyScore(history),
+    overallPerformanceScore: 0,
   };
+
+  // Calculate composite score
+  metrics.overallPerformanceScore = calculateOverallScore(metrics, politician.score);
+  return metrics;
+};
+
+// --- Enriched Metrics Helpers ---
+
+export const calculateCoalitionScore = (politician: Politician): number => {
+  // Base score
+  let score = 50;
+  if (politician.coalition) {
+    if (politician.coalition.toLowerCase().includes('kwanza')) score += 20; // Ruling coalition bonus
+    if (politician.coalition.toLowerCase().includes('azimio')) score += 15; // Official opposition bonus
+    if (politician.coalition.toLowerCase().includes('taifa')) score += 10;
+  }
+  // Penalize if no coalition in a coalition-heavy system
+  if (!politician.coalition) score -= 10;
+  return Math.min(100, Math.max(0, score));
+};
+
+export const calculateEndorsementScore = (politician: Politician): number => {
+  if (!politician.endorsements || politician.endorsements.length === 0) return 0;
+  // Diminishing returns for endorsements
+  return Math.min(100, politician.endorsements.length * 15);
+};
+
+export const calculateControversyPenalty = (history: HistoryItem[]): number => {
+  const recentNegatives = filterByRecentDays(history).filter(h => h.sentiment === 'negative');
+  // Sum of impact of negative events
+  const penalty = recentNegatives.reduce((sum, h) => sum + Math.abs(h.score - (h.score - 1)), 0) * 5;
+  // Simplified: just count count * magnitude. 
+  // Actually h.score is cumulative. We need event impact. 
+  // But history items store the *resulting* score, not the impact directly (except implicitly).
+  // Wait, HistoryItem has no 'impact' field. We only have the resulting score.
+  // We can infer impact by looking at score changes, but that's complex.
+  // Let's use the count of negative events for now.
+  return Math.min(100, recentNegatives.length * 10);
+};
+
+export const calculateRegionalDiversity = (politician: Politician, feed: NewsEvent[]): number => {
+  // In a real app, we'd analyze geolocation of news. 
+  // Here we'll use a heuristic based on unique source count + base region score.
+  const uniqueSources = new Set(feed.filter(e => e.politicianId === politician.id).map(e => e.sourceName)).size;
+  let score = uniqueSources * 10;
+  if (politician.region) score += 30; // Base presence
+  return Math.min(100, score);
+};
+
+export const calculateOverallScore = (metrics: AdvancedMetrics, currentPopularity: number): number => {
+  // Weighted composite
+  return Math.min(100, Math.max(0,
+    (currentPopularity * 0.4) +
+    (metrics.momentum * 10 * 0.2) +
+    (metrics.trendStrength * 100 * 0.1) +
+    (metrics.influenceScore * 0.15) +
+    (metrics.coalitionScore * 0.1) +
+    (metrics.endorsementScore * 0.05)
+  ));
 };
 
 export const calculateAnalyticsSummary = (
